@@ -13,11 +13,11 @@ To run the project, you need to start a simple HTTP server in the `CaseStudy` di
 1. Open a terminal.
 2. Navigate to the `CaseStudy` directory:
     ```sh
-        cd ./CaseStudy
+    cd ./CaseStudy
     ```
 3. Start the HTTP server:
     ```sh
-        python3 -m http.server
+    python3 -m http.server
     ```
 4. Open your web browser and go to `http://localhost:8000`.
 
