@@ -95,49 +95,16 @@ class Dataset:
         Enrichit les données avec des caractéristiques calculées :
             - Nombre de Tweets pour chaque PeriodID
             - Longueur moyenne des Tweets pour chaque PeriodID
-            - Nombre moyen de mots par Tweet pour chaque PeriodID
-            - Variance moyenne de la fréquence des caractères pour chaque PeriodID
         """
 
         for _, df in data.items():
             df = df.copy()  # Créer une copie explicite pour éviter SettingWithCopyWarning
 
             # Calculer le nombre de tweets pour chaque PeriodID
-            df.loc[:, 'NbTweets'] = df.groupby('PeriodID')['PeriodID'].transform('count')
+            df['NbTweets'] = df.groupby('PeriodID')['PeriodID'].transform('count')
 
             # Calculer la longueur moyenne des Tweets pour chaque PeriodID
-            df.loc[:, 'AvgLength'] = df.groupby('PeriodID')['Tweet'].transform(lambda x: x.str.len().mean())
-
-            # Calculer le nombre moyen de mots par Tweet pour chaque PeriodID
-            df.loc[:, 'AvgWords'] = df.groupby('PeriodID')['Tweet'].transform(lambda x: x.apply(lambda tweet: len(tweet.split())).mean())
-
-            # Calculer la fréquence totale de chaque caractère dans tout le dataset
-            all_char_counts = (
-                df['Tweet']
-                .str.replace('[^A-Za-z]', '', regex=True)
-                .str.lower()
-                .apply(lambda x: pd.Series(list(x)))
-                .stack()
-                .value_counts()
-            )
-            avg_char_freq = {char: (count / len(df)) for char, count in all_char_counts.items()}
-
-            # Remplacer les valeurs nan ou infinies par une petite valeur pour éviter la division par zéro
-            avg_char_freq = {char: (freq if freq > 0 else 1e-6) for char, freq in avg_char_freq.items()}
-
-            # Fonction pour calculer la variance de la fréquence des caractères
-            def compute_var_char_freq(tweet, avg_freq):
-                chars = [char.lower() for char in tweet if char.isalpha()]
-                if not chars:
-                    return 0
-                frequencies = [chars.count(char) / avg_freq.get(char, 1e-6) for char in set(chars)]
-                return np.var(frequencies)
-
-            # Calculer la variance moyenne de la fréquence des caractères pour chaque PeriodID
-            df.loc[:, 'AvgVarCharFreq'] = df['Tweet'].apply(lambda x: compute_var_char_freq(x, avg_char_freq))
-
-            # (Optionnel) Supprimer la colonne temporaire si elle n'est plus nécessaire
-            df.drop(columns=['NbEachChar'], inplace=True, errors='ignore')
+            df['AvgLength'] = df.groupby('PeriodID')['Tweet'].transform(lambda x: x.str.len().mean())
 
             # Mettre à jour le DataFrame dans le dictionnaire
             data[_] = df
@@ -351,7 +318,7 @@ if __name__ == '__main__':
 
     # Exemple d'appel de la méthode plot
     Dataset.TEST.plot(
-        source='cleared',
+        source='cleared_enrich',
         agg_func='subplots',  # in 'subplots', 'mean', 'stacked'
         x='PeriodID',
         y='PeriodID',
