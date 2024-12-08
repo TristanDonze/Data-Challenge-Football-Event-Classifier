@@ -3,8 +3,9 @@ import numpy as np
 import pandas as pd
 
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap, Colormap, LinearSegmentedColormap
-from mpl_toolkits.mplot3d import Axes3D  # Import nécessaire pour les plots 3D
+from matplotlib.colors import Colormap, LinearSegmentedColormap
+import torch
+from torch.utils.data import TensorDataset, DataLoader
 
 
 class ColorHue:
@@ -24,12 +25,32 @@ class Dataset:
     def __init__(self, path: str, files: list[str], labeled=True):
         self.path = path
         self.files = files
+
         self.labeled = labeled
+        self.labels_columns = ['EventType']
+
         self.brut_data = self.get_load_data()
         self.cleared_data = self.get_clear_data()
-        self.enrich_cleared_data = None
+        self.enrich_cleared_data = self.get_enrich_data(self.cleared_data)
         self.enrich_brut_data = None
 
+        self.num_features = -1
+        self.setup_data: dict[str, DataLoader] | None = None
+        self.setup_info = {"source": "", "time_step": -1, "batch_size": -1, "shuffle": False}
+
+    def __repr__(self):
+        txt = f"\n | Dataset(path='{self.path}', files={self.files}, labeled={self.labeled})"
+        txt += f"\n | {'No setup' if self.setup_data is None else f'Setup: {self.setup_info}'}"
+        return txt + '\n |______'
+
+    def __iter__(self):
+        """
+        Iterate over the enriched cleared data on (file_name, DataFrame) pairs
+        """
+
+        if self.setup_data is None:
+            raise ValueError("You should call the setup method before iterating over the dataset")
+        return iter(self.setup_data.items())
 
     def _tweet_is_clean(self, tweet: str) -> bool:
         """
@@ -50,6 +71,122 @@ class Dataset:
         if "@" in tweet:
             return True
         return False
+
+    def _preprocess_temporal_data(self, data: dict, batch_size: int, timestep: int, shuffle: bool) -> dict:
+        """
+        Preprocess the temporal data
+
+        ### Arguments:
+            data: dict
+            The data to preprocess
+
+            batch_size: int
+            The size of the batch
+
+            shuffle: bool
+            Shuffle the data or not
+
+        ### Returns:
+            data: dict
+            The preprocessed data
+        """
+        for file_name, df in data.items():
+            X = df[df.columns.difference(self.labels_columns)].values
+
+            if self.labeled:
+                y = df[self.labels_columns].values
+            else:
+                y = np.zeros(len(X))
+
+            data[file_name] = self._prepocess_temporal_datum(X, y, batch_size, timestep, shuffle)
+
+        return data
+
+    def _prepocess_temporal_datum(self, X: np.ndarray, y: np.ndarray, batch_size: int, timestep: int, shuffle: bool) -> DataLoader:
+        """
+        Pré-traite les données temporelles.
+        """
+        half_step = timestep // 2
+        decalage = timestep % 2 == 0
+
+        X_seq = []
+        y_seq = []
+
+        # Ajouter les premiers half_steps éléments complétés avec des zéros
+        for i in range(half_step):
+            zeros_padding = np.zeros((half_step - i, self.num_features))
+            X_slice = X[:i + half_step + 1 - decalage]
+            X_seq.append(np.concatenate([zeros_padding, X_slice]))
+            y_seq.append(y[i])
+
+        # Ajouter les éléments centraux
+        for i in range(half_step, len(X) - half_step + decalage):
+            X_seq.append(X[i - half_step : i + half_step + 1 - decalage])
+            y_seq.append(y[i])
+
+        # Ajouter les derniers half_step éléments complétés avec des zéros
+        for index in range(len(X) - half_step + decalage, len(X)):
+            padding_right = index + half_step + 1 - len(X)
+            if decalage:
+                padding_right -= 1
+            zeros_padding = np.zeros((padding_right, self.num_features))
+            X_seq.append(np.concatenate([X[index - half_step:], zeros_padding]))
+            y_seq.append(y[index])
+
+        X_seq = np.array(X_seq)  # Forme : (num_samples, timesteps, num_features)
+        y_seq = np.array(y_seq)
+
+        # Convertir en tenseurs PyTorch
+        X_seq = torch.from_numpy(X_seq).float()
+        y_seq = torch.from_numpy(y_seq).long() 
+
+        dataset = TensorDataset(X_seq, y_seq)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+        return loader
+
+    def setup(self, source: str, batch_size: int, timestep: int, shuffle: bool = True):
+        """
+        Setup the dataset for training
+
+        ### Arguments:
+            source: str
+            The source of the data
+            Should be in ['brut', 'cleared', 'brut_enrich', 'cleared_enrich']
+
+            batch_size: int
+            The size of the batch
+
+            shuffle: bool
+            Shuffle the data or not
+        """
+        if source not in ['brut', 'cleared', 'brut_enrich', 'cleared_enrich']:
+            raise ValueError(f"source should be in ['brut', 'cleared', 'brut_enrich', 'cleared_enrich'], got {source}")
+
+        if source == 'brut':
+            data = self.brut_data
+        elif source == 'cleared':
+            data = self.cleared_data
+        elif source == 'brut_enrich':
+            if self.enrich_brut_data is None:
+                self.enrich_brut_data = self.get_enrich_data(self.brut_data)
+            data = self.enrich_brut_data
+        elif source == 'cleared_enrich':
+            if self.enrich_cleared_data is None:
+                self.enrich_cleared_data = self.get_enrich_data(self.cleared_data)
+            data = self.enrich_cleared_data
+
+        self.num_features = next(iter(data.values())).shape[1] - len(self.labels_columns)
+        self.setup_data = self._preprocess_temporal_data(data, batch_size, timestep, shuffle)
+        self.setup_info = {"source": source, "time_step": timestep, "batch_size": batch_size, "shuffle": shuffle}
+    
+    def get_timestep(self) -> int:
+        return self.setup_info["time_step"]
+    
+    def set_timestep(self, timestep: int):
+        if self.setup_data is None:
+            raise ValueError("You should call the setup method before setting the timestep")
+        self.setup(self.setup_info["source"], self.setup_info["batch_size"], timestep, self.setup_info["shuffle"])
 
     def get_load_data(self) -> dict:
         """
@@ -98,16 +235,23 @@ class Dataset:
         """
 
         for _, df in data.items():
-            df = df.copy()  # Créer une copie explicite pour éviter SettingWithCopyWarning
+            if self.labeled:
+                agg_data = df.groupby('PeriodID').agg(
+                    NbTweets=('Tweet', 'count'),
+                    AvgLength=('Tweet', lambda x: x.str.len().mean()),
+                    EventType=('EventType', 'first'),
+                    PeriodId=('PeriodID', 'first'),
+                ).reset_index()
+            
+            else:
+                agg_data = df.groupby('PeriodID').agg(
+                    NbTweets=('Tweet', 'count'),
+                    AvgLength=('Tweet', lambda x: x.str.len().mean()),
+                    PeriodId=('PeriodID', 'first'),
+                    MatchID=('MatchID', 'first'),
+                ).reset_index()
 
-            # Calculer le nombre de tweets pour chaque PeriodID
-            df['NbTweets'] = df.groupby('PeriodID')['PeriodID'].transform('count')
-
-            # Calculer la longueur moyenne des Tweets pour chaque PeriodID
-            df['AvgLength'] = df.groupby('PeriodID')['Tweet'].transform(lambda x: x.str.len().mean())
-
-            # Mettre à jour le DataFrame dans le dictionnaire
-            data[_] = df
+            data[_] = agg_data
 
         return data
 
